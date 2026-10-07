@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+downloads/
+*.torrent
+*.aria2
+*.mkv
+*.mp4
+*.log
