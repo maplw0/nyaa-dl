@@ -39,13 +39,18 @@ them download, all from one screen.
 In qBittorrent: **Tools -> Options -> Web UI**
 
 1. Tick **Web User Interface (Remote control)**. The default port is `8080`.
-2. Choose how this app gets in. Pick one:
-   - **Username and password** (works everywhere): set them under *Authentication*. Fresh installs of recent
-     versions print a temporary random password to qBittorrent's log the first time it starts; change it here.
-   - **No login for trusted machines**: tick *Bypass authentication for clients on localhost* (app and qBittorrent
-     on the same PC) or *Bypass authentication for clients in whitelisted IP subnets* (for example your home network
-     `192.168.1.0/24`). Only do this on a network you trust.
+2. Set a **username and password** under *Authentication* (recommended, and the only sensible option if
+   qBittorrent is on another machine). Fresh installs of recent versions print a temporary random password to
+   qBittorrent's log the first time it starts; change it here.
+   - Only if qBittorrent runs on **this same PC**, you can instead tick *Bypass authentication for clients on
+     localhost* and skip the login.
 3. Click **Apply**.
+
+> **Do not turn off authentication for other machines or whole subnets** ("bypass for whitelisted IP subnets").
+> Anyone who can reach an unauthenticated Web UI can control qBittorrent, including making it run programs on
+> its host. That also applies if qBittorrent sits behind a reverse proxy or Docker network, where every client
+> can look like the same trusted address. Never expose the Web UI port to the internet; if you need remote
+> access, go through a VPN such as Tailscale or WireGuard.
 
 Running qBittorrent in Docker? The `linuxserver/qbittorrent` image enables the Web UI on `WEBUI_PORT` (default
 `8080`); set its username and password the same way from the Web UI settings.
@@ -63,27 +68,27 @@ cd nyaa-dl
 
 ### 3. Run it
 
-qBittorrent on the same PC, no login needed:
+qBittorrent on the same PC (with localhost bypass on):
 
 ```bash
 python nyaa.py
 ```
 
-qBittorrent on another machine, with a login:
+qBittorrent with a login, here or on another machine:
 
 ```bash
 python nyaa.py --qbit http://192.168.1.50:8080 --user admin
 ```
 
-It asks for the password (typing is hidden). To skip the prompt, set environment variables instead (nothing ends
-up in your shell history or in the repo):
+It asks for the password (typing is hidden). There is deliberately **no `--password` flag**, because command lines
+end up in process lists and shell history.
 
-```powershell
-$env:QBIT_URL  = "http://192.168.1.50:8080"
-$env:QBIT_USER = "admin"
-$env:QBIT_PASS = "your-password"
-python nyaa.py
-```
+To avoid the prompt, set the `QBIT_USER` / `QBIT_PASS` / `QBIT_URL` environment variables. Set them in
+*Windows -> Edit environment variables for your account* (or your PowerShell profile). Don't type
+`$env:QBIT_PASS = "..."` at a prompt: PowerShell saves what you type in its history file in plain text.
+
+`http://` traffic to qBittorrent, including the login, is unencrypted. That is fine on the same PC; across a
+network, use `https://` (if your qBittorrent has it set up) or reach it over a VPN.
 
 ## Using it
 
@@ -120,7 +125,7 @@ means connected seeders / total seeders in the swarm (same for `L:`); `?` means 
 |---|---|---|
 | `--qbit URL` | `QBIT_URL` | qBittorrent Web UI address (default `http://localhost:8080`) |
 | `--user NAME` | `QBIT_USER` | Web UI username, if it needs a login |
-| `--password PW` | `QBIT_PASS` | Web UI password (prompted for if you pass `--user` without it; prefer the env var or the prompt over this flag) |
+| | `QBIT_PASS` | Web UI password. Env var only; if unset and `--user` is given, you're prompted |
 | `--save PATH` | | where qBittorrent should save new downloads (default: qBittorrent's own default) |
 
 `--save` is a path **as qBittorrent sees it**. If qBittorrent runs in Docker or on another machine, that is the
@@ -130,12 +135,12 @@ path inside the container or on that machine, for example `/data/torrents/nyaa`,
 
 - **"can't reach qBittorrent"**: wrong address or port, the Web UI isn't enabled, or a firewall is in the way.
   Open the same address in a browser to check.
-- **"HTTP 403 ... needs a login"**: add `--user`, or allow your machine to skip authentication (step 1). If you
-  just entered a login and it keeps failing, qBittorrent may have temporarily banned your IP after repeated
-  wrong passwords; wait a while or restart qBittorrent.
+- **"HTTP 403 ... needs a login"**: add `--user` (and set a password in qBittorrent, step 1). If you just entered
+  a login and it keeps failing, qBittorrent may have temporarily banned your IP after repeated wrong passwords;
+  wait a while or restart qBittorrent.
 - **"qBittorrent rejected that username/password"**: check them in qBittorrent's Web UI settings.
-- **Through a reverse proxy or hostname, requests are refused**: add the hostname to *Web UI -> Server domains*
-  or relax *Host header validation* / *CSRF protection*.
+- **Through a reverse proxy or hostname, requests are refused**: add that exact hostname to *Web UI -> Server
+  domains*. Leave *Host header validation* and *CSRF protection* switched on.
 - **Garbled lines or stray characters**: use Windows Terminal and make the window a bit wider.
 - **Info page shows "(couldn't read the file list)"**: nyaa changed its page layout; the file list is read from
   the site's HTML, so it may need a small update.
@@ -144,5 +149,9 @@ path inside the container or on that machine, for example `/data/torrents/nyaa`,
 
 - Search uses the sites' public RSS feeds; the info page reads the torrent's public web page. The `.torrent`
   file is fetched on your PC and uploaded to qBittorrent, so the qBittorrent machine never needs to reach nyaa.
+- Text from the sites and from torrents (titles, file names, descriptions) is untrusted, so control characters
+  are replaced with `?` before anything is drawn. Links taken from the sites' feeds are only fetched if they are
+  `https` on nyaa.si / sukebei.nyaa.si.
+- This is an unofficial tool, not affiliated with nyaa.si. This repository hosts no torrents or media.
 - sukebei.nyaa.si is the adult section of nyaa. Only use it if you are of legal age where you live.
 - You are responsible for what you download. Only download content you have the right to.

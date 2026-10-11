@@ -51,9 +51,13 @@ def cw(c):  # terminal cells a character takes (Japanese is double-width)
     return 2 if unicodedata.east_asian_width(c) in "WF" else 1
 
 
+def safe(c):  # untrusted text (titles, file names, descriptions) must never inject terminal escapes
+    return "?" if unicodedata.category(c) in ("Cc", "Cf") else c  # control + invisible formatting (ESC, bidi overrides)
+
+
 def fit(s, w):  # cut/pad to w terminal cells
     out, n = "", 0
-    for c in s:
+    for c in map(safe, s):
         if n + cw(c) > w:
             break
         out, n = out + c, n + cw(c)
@@ -62,7 +66,7 @@ def fit(s, w):  # cut/pad to w terminal cells
 
 def wrap(s, w):  # split into lines of at most w terminal cells
     out, cur, n = [], "", 0
-    for c in s:
+    for c in map(safe, s):
         if n + cw(c) > w:
             out, cur, n = out + [cur], "", 0
         cur, n = cur + c, n + cw(c)
@@ -91,7 +95,7 @@ def info_lines(f, page):
             nfiles += 1
             tree.append("  " * (depth - 1) + f"{unescape(m[2])}  ({m[3]})")
     desc = re.search(r'id="torrent-description">(.*?)</div>', page, re.S)
-    desc = unescape(desc[1]).replace("\r", "").strip() if desc else ""
+    desc = unescape(desc[1]).replace("\r", "").replace("\t", "    ").strip() if desc else ""
     return L + [f"Files ({nfiles})"] + (tree or ["(couldn't read the file list)"]) + ["", "Description"] + \
            (desc.split("\n") if desc else ["(none)"])
 
@@ -105,10 +109,17 @@ def dl_info_lines(t, files):
 
 def search(host, q):
     url = f"https://{host}/?page=rss&q={urllib.parse.quote(q)}"
-    rows = [{c.tag.split("}")[-1]: (c.text or "") for c in it}  # strip xml namespace
-            for it in ET.fromstring(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30).read()).iter("item")]
-    rows.sort(key=lambda f: -int(f.get("seeders") or 0))  # RSS ignores sort params
+    feed = urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30).read(5_000_000)
+    rows = [{c.tag.split("}")[-1]: (c.text or "") for c in it} for it in ET.fromstring(feed).iter("item")]  # strip xml namespace
+    rows.sort(key=lambda f: int(f.get("seeders") if str(f.get("seeders")).isdigit() else 0), reverse=True)  # RSS ignores sort params
     return rows
+
+
+def check_url(u, strict):
+    """Only http(s) is ever fetched. strict (links that came from a feed): https on the nyaa hosts only."""
+    p = urllib.parse.urlparse(u)
+    if p.scheme not in ("http", "https") or (strict and not (p.scheme == "https" and p.hostname in SITES)):
+        raise OSError(f"refusing to fetch {u[:60]!r}")
 
 
 def to_torrent_url(u):
@@ -132,10 +143,12 @@ def dl_row(t, w):
 
 def refresh(st):
     try:
-        st.dl = sorted(json.loads(api_get("torrents/info", tag=TAG)), key=lambda t: t["added_on"])
-    except OSError:
+        data = json.loads(api_get("torrents/info", tag=TAG))
+    except (OSError, ValueError):  # unreachable, or something other than qBittorrent answered
         st.msg = "qBittorrent not responding"
         return
+    # belt and braces: never show or touch a torrent that isn't ours, even if the server ignored the tag filter
+    st.dl = sorted((t for t in data if TAG in [x.strip() for x in t.get("tags", "").split(",")]), key=lambda t: t["added_on"])
     live = [t for t in st.dl if t["progress"] < 1 and not t["state"].startswith(("stopped", "paused", "error", "missing"))]
     st.g = {"numActive": sum(not t["state"].startswith("queued") for t in live),
             "numWaiting": sum(t["state"].startswith("queued") for t in live),
@@ -171,7 +184,7 @@ def draw(st, W, H):
 
     tabs = " ".join(f"\x1b[7m {s} \x1b[0m" if i == st.site else f" {s} " for i, s in enumerate(SITES))
     g = st.g or {}
-    L = [f" {tabs}   \x1b[33m{st.msg}\x1b[0m",
+    L = [f" {tabs}   \x1b[33m{''.join(map(safe, st.msg))}\x1b[0m",
          fit(" Search: " + st.query + ("_" if st.focus == "search" else ""), W),
          sep(f"Results ({len(st.results)}), {len(st.sel)} selected")]
     for j in range(rh):
@@ -195,13 +208,15 @@ def paint(st):
     print("\x1b[H" + "\n".join(l + "\x1b[K" for l in draw(st, W, H)), end="", flush=True)
 
 
-def add(st, urls):
+def add(st, urls, strict=False):
     for u in urls:
         fields = {"tags": TAG, **({"savepath": st.save} if st.save else {})}
         if u.startswith("magnet:"):
             r = api_post("torrents/add", {**fields, "urls": u})
         else:  # fetch the .torrent here so the server doesn't need to reach nyaa itself
-            blob = urllib.request.urlopen(urllib.request.Request(to_torrent_url(u), headers=UA), timeout=30).read()
+            u = to_torrent_url(u)
+            check_url(u, strict)
+            blob = urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=30).read(10_000_000)
             r = api_post("torrents/add", fields, torrent=blob)
         if "Ok" not in r:
             raise OSError(f"qBittorrent said {r.strip()!r}")
@@ -245,7 +260,7 @@ def handle(st, k):
                     st.results, st.sel, st.cur, st.top = search(SITES[st.site], q), set(), 0, 0
                     st.msg = "" if st.results else "no results"
                     st.focus = "results" if st.results else "search"
-            except OSError as e:
+            except (OSError, ValueError) as e:
                 st.msg = f"error: {e}"
             except ET.ParseError:
                 st.msg = "bad response from site"
@@ -276,16 +291,17 @@ def handle(st, k):
             try:
                 st.msg = "loading..."
                 redraw()
+                check_url(st.results[st.cur].get("guid", ""), True)
                 page = urllib.request.urlopen(urllib.request.Request(st.results[st.cur]["guid"], headers=UA), timeout=20)
-                st.view = NS(lines=info_lines(st.results[st.cur], page.read().decode("utf-8", "replace")), top=0)
+                st.view = NS(lines=info_lines(st.results[st.cur], page.read(3_000_000).decode("utf-8", "replace")), top=0)
                 st.msg = ""
-            except OSError as e:
+            except (OSError, ValueError) as e:
                 st.msg = f"error: {e}"
         elif k == "\r" and n:
             try:
-                add(st, [st.results[i]["link"] for i in sorted(st.sel or {st.cur})])
+                add(st, [st.results[i].get("link", "") for i in sorted(st.sel or {st.cur})], strict=True)
                 st.sel = set()
-            except OSError as e:
+            except (OSError, ValueError) as e:
                 st.msg = f"error: {e}"
         elif k in ("/", "\x1b"):
             st.focus = "search"
@@ -308,7 +324,7 @@ def handle(st, k):
                     act(start_cmd if t["state"].startswith(("stopped", "paused")) else stop_cmd, [t["hash"]])
                 else:
                     act("delete", [t["hash"]], deleteFiles="false")
-        except OSError as e:
+        except (OSError, ValueError) as e:
             st.msg = f"error: {e}"
     return True
 
@@ -336,9 +352,8 @@ def connect(url, user="", password=""):
             raise SystemExit("qBittorrent rejected that username/password")
         ver = api_get("app/version").strip()
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"qBittorrent at {QB} answered HTTP {e.code}: it needs a login. Pass --user (see README), "
-                         "or allow your IP/subnet to skip auth in its Web UI settings")
-    except OSError as e:
+        raise SystemExit(f"qBittorrent at {QB} answered HTTP {e.code}: it needs a login. Pass --user (see README)")
+    except (OSError, ValueError) as e:
         raise SystemExit(f"can't reach qBittorrent at {QB}: {e}")
     if not ver.lstrip("v").startswith(("5", "6", "7")):
         stop_cmd, start_cmd = "pause", "resume"
@@ -350,13 +365,11 @@ def main():
     ap = argparse.ArgumentParser(description="Search nyaa.si / sukebei.nyaa.si and send torrents to qBittorrent.")
     ap.add_argument("--qbit", default=os.environ.get("QBIT_URL", QB), help="qBittorrent Web UI url (env QBIT_URL)")
     ap.add_argument("--user", default=os.environ.get("QBIT_USER", ""), help="Web UI username, if it needs a login (env QBIT_USER)")
-    ap.add_argument("--password", default=os.environ.get("QBIT_PASS", ""),
-                    help="Web UI password (env QBIT_PASS; prompted for if --user is set and this is empty)")
     ap.add_argument("--save", default="", help="save path as the *server* sees it, e.g. /data/torrents/nyaa (default: qBittorrent's)")
     a = ap.parse_args()
-    if a.user and not a.password:
-        a.password = getpass.getpass(f"qBittorrent password for {a.user}: ")
-    connect(a.qbit, a.user, a.password)
+    # no --password flag on purpose: command lines show up in process lists and shell history
+    password = os.environ.get("QBIT_PASS", "") or (getpass.getpass(f"qBittorrent password for {a.user}: ") if a.user else "")
+    connect(a.qbit, a.user, password)
     os.system("")  # enables ANSI escapes on Windows consoles
     st = NS(save=a.save, site=0, query="", results=[], sel=set(), cur=0, top=0, dl=[], dcur=0, dtop=0,
             focus="search", msg="", g={}, view=None)

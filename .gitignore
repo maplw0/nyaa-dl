@@ -3,6 +3,12 @@ __pycache__/
 downloads/
 *.torrent
 *.aria2
+*.part
 *.mkv
 *.mp4
+*.avi
+*.webm
 *.log
+.env
+*.env
+.venv/
